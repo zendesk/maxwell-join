@@ -1,11 +1,14 @@
 package com.zendesk.maxwelljoin
 
+import java.util.concurrent.{TimeoutException, ConcurrentLinkedQueue, TimeUnit}
+import scala.concurrent.duration._
+
 import java.util.{Properties, Date}
 
 import akka.routing.{RoundRobinPool, RoundRobinRoutingLogic, Router}
-import org.apache.kafka.clients.consumer.{ConsumerRecord, KafkaConsumer}
+import org.apache.kafka.clients.consumer.{OffsetAndMetadata, ConsumerRecord, KafkaConsumer}
 
-import akka.actor.{ActorRef, Props, ActorSystem, Actor}
+import akka.actor._
 import org.apache.kafka.common.TopicPartition
 import org.json4s.FieldSerializer._
 
@@ -14,8 +17,11 @@ import scala.collection.JavaConversions._
 import scala.collection.mutable.ListBuffer
 import scala.util.Random
 
+case class GetCommitOffsets()
+case class FlushCommitOffsets()
 case class RawMessage(record: ConsumerRecord[String, String])
 case class Processed(partition: Int, offset: Long)
+case class CommitOffsets(offsets: Map[Int, Long])
 case class MaxwellRow(rowType: String, database: String, table: String, data: Map[String, Any])
 
 case class ParsedMessage(partition: Int, offset: Long, primaryKey: List[Any], row: MaxwellRow, topSender: ActorRef)
@@ -25,7 +31,7 @@ case class PartitionOffset(map: Map[Long, Boolean] = Map(), min: Long = Long.Max
   def start(offset: Long) =
     PartitionOffset(map + (offset -> false), Math.min(min, offset))
 
-  def finish(offset: Long) = {
+  def finish(offset: Long)(commit: (Long) => Unit) = {
     val m = map + (offset -> true)
 
     var lastFinished = min
@@ -36,9 +42,8 @@ case class PartitionOffset(map: Map[Long, Boolean] = Map(), min: Long = Long.Max
       lastFinished = lastFinished + 1
     }
 
-    println("received finish message for " + offset + " : " + finishedOffsets)
     finishedOffsets.lastOption.map { o =>
-      println("could commit at #" + (o + 1))
+      commit(o + 1)
     }
 
     val newMin = finishedOffsets.lastOption.map(_ + 1).getOrElse(min)
@@ -50,24 +55,26 @@ case class PartitionOffset(map: Map[Long, Boolean] = Map(), min: Long = Long.Max
 class OffsetManager extends Actor {
   val parsers = context.actorOf(Props[Parser].withRouter(RoundRobinPool(5)), "json-parser")
   /* partition -> ( offset -> finished ) */
-  var outstanding: Map[Int, PartitionOffset] = Map()
+  var outstanding: Map[Int, PartitionOffset] = Map().withDefault { partition => PartitionOffset() }
   var minOffsets: Map[Int, Long] = Map()
 
-  private def updateOutstandingRows(partition: Int, offset: Long, complete: Boolean): Unit = {
-    val partitionOffset = outstanding.getOrElse(partition, PartitionOffset())
-    val updatedPartitionOffset = partitionOffset.start(offset)
-
-    outstanding = outstanding + (partition -> updatedPartitionOffset)
-  }
+  var commitOffsets = Map[Int, Long]()
 
   def receive = {
     case m: RawMessage =>
-      val partitionOffset = outstanding.getOrElse(m.record.partition, PartitionOffset())
+      val partitionOffset = outstanding(m.record.partition)
       outstanding += (m.record.partition -> partitionOffset.start(m.record.offset))
       parsers ! m
     case m: Processed =>
-      val partitionOffset = outstanding.getOrElse(m.partition, PartitionOffset())
-      outstanding += (m.partition -> partitionOffset.finish(m.offset))
+      val partitionOffset = outstanding(m.partition)
+      val newOffsetMap = partitionOffset.finish(m.offset) { offset =>
+        commitOffsets += (m.partition -> offset)
+      }
+      outstanding += (m.partition -> newOffsetMap)
+    case m: GetCommitOffsets =>
+      sender ! CommitOffsets(commitOffsets)
+    case m: FlushCommitOffsets =>
+      commitOffsets = Map()
   }
 }
 
@@ -118,11 +125,11 @@ class Filter extends Actor {
       }
   }
 }
-class MaxwellJoinKafkaConsumer(actor: ActorRef) {
+class MaxwellJoinKafkaConsumer(inbox: Inbox, actor: ActorRef) {
   val props = new Properties()
 
-  props.put("bootstrap.servers", "localhost:9092")
-  props.put("group.id", "test-consumer")
+  props.put("bootstrap.servers", "docker-vm:9092")
+  props.put("group.id", "test-consumer-2")
   props.put("enable.auto.commit", "false")
   props.put("session.timeout.ms", "30000")
 
@@ -132,19 +139,42 @@ class MaxwellJoinKafkaConsumer(actor: ActorRef) {
   props.put("auto.offset.reset", "earliest")
 
   val consumer = new KafkaConsumer[String, String](props)
+
+  private def commitOffsets() = {
+    println("checking offsets...")
+    try {
+      inbox.send(actor, GetCommitOffsets())
+      inbox.receive(100 milliseconds) match {
+        case m: CommitOffsets =>
+          if (m.offsets.size > 0) {
+            println("aaa Got CommitOffset: " + m)
+            val kafkaCommitMap = m.offsets.map {
+              case (partition, offset) =>
+                val topicPartition = new TopicPartition("maxwell", partition)
+                (topicPartition -> new OffsetAndMetadata(offset))
+            }
+            consumer.commitAsync(kafkaCommitMap, null)
+
+            inbox.send(actor, FlushCommitOffsets())
+          }
+      }
+    } catch {
+      case x: TimeoutException => println("got timeout.")
+    }
+  }
+
   def run = {
     consumer.subscribe(List("maxwell"))
-    consumer.
-
-    val topicPartition = new TopicPartition("maxwell", 0)
+    println(consumer.assignment)
+    consumer.seekToBeginning(consumer.assignment.toList : _*)
 
     while (true) {
       val records = consumer.poll(100)
       for (record <- records) {
-        actor ! RawMessage(record)
-
+        inbox.send(actor, RawMessage(record))
         println(record.key())
       }
+      commitOffsets()
     }
   }
 }
@@ -152,7 +182,7 @@ object MaxwellJoin extends App {
   val system = ActorSystem("maxwell-join")
 
   val props = Props[OffsetManager]
-  val parsers = system.actorOf(Props[OffsetManager].withMailbox("bounded-mailbox"), "offset-manager")
-  val consumer = new MaxwellJoinKafkaConsumer(parsers)
+  val offsetManager = system.actorOf(Props[OffsetManager].withMailbox("bounded-mailbox"), "offset-manager")
+  val consumer = new MaxwellJoinKafkaConsumer(Inbox.create(system), offsetManager)
   consumer.run
 }

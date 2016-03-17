@@ -1,10 +1,15 @@
 package com.zendesk.maxwelljoin
 
+import java.util
 import java.util.Properties
 import com.zendesk.maxwelljoin.mawxwelljoin.{MaxwellData, MapByID}
+import org.apache.kafka.clients.producer.Partitioner
+import org.apache.kafka.clients.producer.internals.DefaultPartitioner
+import org.apache.kafka.common.Cluster
 import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializer}
 import org.apache.kafka.streams.kstream._
 import org.apache.kafka.streams._
+import org.apache.kafka.streams.kstream.internals.KStreamImpl
 
 import scala.collection.immutable.HashMap
 
@@ -13,34 +18,15 @@ package object mawxwelljoin {
   type MapByID = Map[BigInt, MaxwellData]
 }
 
-case class MaxwellKey(val table: String, val database: String, val pk: List[Any])
+case class MaxwellKey(val database: String, val table: String, val pk: List[Map[String, Any]])
 case class MaxwellTableDatabase(val table: String, val database: String)
 case class MaxwellValue(val rowType: String, val database: String, val table: String,
                         val ts: BigInt, val xid: BigInt,
                         val data: Map[String, Any])
 
-class ListAggregator extends Aggregator[MaxwellKey, String, List[String]] {
-  override def apply(aggKey: MaxwellKey, value: String, aggregate: List[String]): List[String] = {
-    aggregate :+ value
-  }
-}
 
-// link ticket to user.  ok.  so we need to send ticket-user pairs (or all of them?)
-// to the user channel... yes?
-
-// so... two tables, one that aggregates
-
-
-// KEY: TiCKET-1
-// LEFT-VAL: TICKET
-// RIGHT-VAL: LIST OF USERS
-
-// users, aggregate to list of users on tikets key.
-// that would join things, but it would also sprawl, wouldn't it?
-
-
-case class TableFilter(table: String) extends Predicate[MaxwellKey, MaxwellValue] {
-  override def test(key: MaxwellKey, value: MaxwellValue): Boolean = key.table == table
+case class TableFilter(table: String) extends Predicate[MaxwellKey, MaxwellData] {
+  override def test(key: MaxwellKey, value: MaxwellData): Boolean = key.table == table
 }
 
 case class MapMaxwellValue() extends ValueMapper[MaxwellValue, MaxwellData] {
@@ -63,12 +49,22 @@ object MaxwellJoin extends App {
     settings.put(StreamsConfig.JOB_ID_CONFIG, "maxwell-joiner")
     settings.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "docker-vm:9092")
     settings.put(StreamsConfig.ZOOKEEPER_CONNECT_CONFIG, "docker-vm:2181/kafka")
+    settings.put("partitioner.class", classOf[MaxwellJoinPartitioner])
     settings
   }
 
-  val maxwellInputStream: KStream[MaxwellKey, MaxwellValue] =
-    builder.stream(MaxwellKeyDeserializer(), JsonDeserializer[MaxwellValue](), "maxwell")
+  val keySer      = MaxwellKeySerializer()
+  val keyDeser    = MaxwellKeyDeserializer()
+  val valSer      = JsonSerializer[MaxwellValue]()
+  val valDeser    = JsonDeserializer[MaxwellValue]()
+  val idMapSer    = JsonSerializer[MapByID]()
+  val idMapDeser  = JsonDeserializer[MapByID]()
+  val mxDataSer   = JsonSerializer[MaxwellData]()
+  val mxDataDeser = JsonDeserializer[MaxwellData]()
 
+  val maxwellInputTable: KTable[MaxwellKey, MaxwellData] = builder
+    .table(keySer, valSer, keyDeser, valDeser, "maxwell")
+    .mapValues(MapMaxwellValue())
 
   class TicketFieldAggregator extends Aggregator[MaxwellKey, MapByID, MapByID] {
     override def apply(aggKey: MaxwellKey, value: MapByID, aggregate: MapByID): MapByID = {
@@ -76,18 +72,35 @@ object MaxwellJoin extends App {
     }
   }
 
-  val aggregateStream = maxwellInputStream
+  class MaxwellJoinPartitioner extends DefaultPartitioner {
+    override def partition(topic: String,
+                           key: scala.AnyRef,
+                           keyBytes: Array[Byte],
+                           value: scala.AnyRef,
+                           valueBytes: Array[Byte],
+                           cluster: Cluster) = {
+      topic match {
+        case "maxwell-join-ticket_field_entries-by-ticket" =>
+          val k = keyDeser.deserialize(topic, keyBytes)
+          Math.abs(k.database.hashCode() % cluster.partitionCountForTopic(topic))
+        case _ => super.partition(topic, key, keyBytes, value, valueBytes, cluster)
+      }
+    }
+  }
+
+  val aggregateStream = maxwellInputTable
+    .toStream()
     .filter(TableFilter("ticket_field_entries"))
-    .map(new KeyValueMapper[MaxwellKey, MaxwellValue, KeyValue[MaxwellKey, MapByID]] {
-      override def apply(key: MaxwellKey, value: MaxwellValue) = {
-        val document = value.data
+    .map(new KeyValueMapper[MaxwellKey, MaxwellData, KeyValue[MaxwellKey, MapByID]] {
+      override def apply(key: MaxwellKey, value: MaxwellData) = {
+        val document = value
         val map : MapByID = document.get("id") match {
           case Some(intID : BigInt) => Map(intID -> document)
           case _ => Map[BigInt, MaxwellData]()
         }
         val newKey = document.get("ticket_id") match {
           case Some(ticketID : BigInt) =>
-            MaxwellKey("tickets", key.database, List(ticketID))
+            MaxwellKey(key.database, "tickets", List(Map("id" -> ticketID)))
         }
 
         new KeyValue(newKey, map)
@@ -98,35 +111,35 @@ object MaxwellJoin extends App {
         override def apply() = Map[BigInt, MaxwellData]()
       },
       new TicketFieldAggregator(),
-      RowKeySerializer(),
-      JsonSerializer[MapByID](),
-      RowKeyDeserializer(),
-      JsonDeserializer[MapByID](),
+      keySer, idMapSer, keyDeser, idMapDeser,
       "fields-by-ticket"
     )
 
-  val tfeAggregateTable =
-    aggregateStream.through("maxwell-join-ticket_field_entries-by-ticket",
-      RowKeySerializer(), JsonSerializer[MapByID](),
-      RowKeyDeserializer(), JsonDeserializer[MapByID]()
-    )
+  val tfeAggregateTable = aggregateStream.through(
+    "maxwell-join-ticket_field_entries-by-ticket",
+    keySer, idMapSer, keyDeser, idMapDeser
+  )
 
   val ticketsTable: KTable[MaxwellKey, MaxwellData] =
-    maxwellInputStream
-      .filter(TableFilter("tickets"))
-      .mapValues(MapMaxwellValue())
-      .reduceByKey( new Reducer[MaxwellData]() {
-        override def apply(v1: MaxwellData, v2: MaxwellData) = v2
-        },
-        RowKeySerializer(), JsonSerializer[MaxwellData](), MaxwellKeyDeserializer(), JsonDeserializer[MaxwellData](),
-        "reduce-tickets-table"
-      ).through("maxwell-join-tickets", RowKeySerializer(), JsonSerializer[MaxwellData], RowKeyDeserializer(), JsonDeserializer[MaxwellData]())
+    maxwellInputTable.filter(TableFilter("tickets"))
 
-  ticketsTable.join(tfeAggregateTable, new ValueJoiner[MaxwellData, MapByID, MaxwellData] {
+  ticketsTable.leftJoin(tfeAggregateTable, new ValueJoiner[MaxwellData, MapByID, MaxwellData] {
     override def apply(value1: MaxwellData, value2: MapByID): MaxwellData = {
-      value1 + ("ticket_field_entries" -> value2.values.toList)
+      if ( value2 != null )
+        value1 + ("ticket_field_entries" -> value2.values.toList)
+      else
+        value1
     }
-  }).to("maxwell-join-final-tickets", RowKeySerializer(), JsonSerializer[MaxwellData])
+  }).to("maxwell-join-final-tickets", keySer, mxDataSer)
+
+  builder.stream(keyDeser, mxDataDeser, "maxwell-join-final-tickets").map(
+    new KeyValueMapper[MaxwellKey, MaxwellData, KeyValue[MaxwellKey, MaxwellData]]() {
+      override def apply(key: MaxwellKey, value: MaxwellData) = {
+        println(s"k: $key, v: $value")
+        new KeyValue(key, value)
+      }
+    }
+  )
 
   val stream: KafkaStreams = new KafkaStreams(builder, streamingConfig)
   stream.start()

@@ -1,17 +1,15 @@
 package com.zendesk.maxwelljoin
 
-import java.util
 import java.util.Properties
 import com.zendesk.maxwelljoin.mawxwelljoin.{MaxwellData, MapByID}
-import org.apache.kafka.clients.producer.Partitioner
 import org.apache.kafka.clients.producer.internals.DefaultPartitioner
 import org.apache.kafka.common.Cluster
 import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializer}
 import org.apache.kafka.streams.kstream._
 import org.apache.kafka.streams._
-import org.apache.kafka.streams.kstream.internals.KStreamImpl
+import org.apache.kafka.streams.kstream.internals.{MaxwellKTable, KTableProcessorSupplier, KTableImpl}
+import org.apache.kafka.streams.processor.ProcessorSupplier
 
-import scala.collection.immutable.HashMap
 
 package object mawxwelljoin {
   type MaxwellData = Map[String, Any]
@@ -32,7 +30,6 @@ case class TableFilter(table: String) extends Predicate[MaxwellKey, MaxwellData]
 case class MapMaxwellValue() extends ValueMapper[MaxwellValue, MaxwellData] {
   override def apply(value: MaxwellValue) = value.data
 }
-
 
 object MaxwellJoin extends App {
 
@@ -66,11 +63,13 @@ object MaxwellJoin extends App {
     .table(keySer, valSer, keyDeser, valDeser, "maxwell")
     .mapValues(MapMaxwellValue())
 
+
   class TicketFieldAggregator extends Aggregator[MaxwellKey, MapByID, MapByID] {
     override def apply(aggKey: MaxwellKey, value: MapByID, aggregate: MapByID): MapByID = {
       aggregate ++ value
     }
   }
+
 
   class MaxwellJoinPartitioner extends DefaultPartitioner {
     override def partition(topic: String,
@@ -120,17 +119,55 @@ object MaxwellJoin extends App {
     keySer, idMapSer, keyDeser, idMapDeser
   )
 
+
+  // start with addSource(...)
+  // add key-remap processor
+  // add join provider?  So you start with the raw stream
+
+
+  // subclass the builder?  but then you have to output our table class
+  // the whole damn thing has to be subclassed.
+
+  // fork the fucking library?  seems nutso.
+
+  // hack it and expose the names?
+
   val ticketsTable: KTable[MaxwellKey, MaxwellData] =
     maxwellInputTable.filter(TableFilter("tickets"))
 
-  ticketsTable.leftJoin(tfeAggregateTable, new ValueJoiner[MaxwellData, MapByID, MaxwellData] {
+  val mxKT = MaxwellKTable(ticketsTable)
+
+  val tfeJoiner = new ValueJoiner[MaxwellData, MapByID, MaxwellData] {
     override def apply(value1: MaxwellData, value2: MapByID): MaxwellData = {
       if ( value2 != null )
         value1 + ("ticket_field_entries" -> value2.values.toList)
       else
         value1
     }
-  }).to("maxwell-join-final-tickets", keySer, mxDataSer)
+  }
+
+
+  val userJoiner = new ValueJoiner[MaxwellData, MaxwellData, MaxwellData] {
+    override def apply(value1: MaxwellData, value2: MaxwellData): MaxwellData = {
+      if ( value2 != null)
+        value1  + ("requester" -> value2)
+      else
+        value1
+    }
+  }
+  val userMapper = new KeyMapper[MaxwellKey, MaxwellKey, MaxwellData] {
+    override def apply(key: MaxwellKey, value: MaxwellData): MaxwellKey = {
+      val userID = value.get("requester_id").get
+      MaxwellKey(key.database, "users", List(Map("id" -> userID)))
+    }
+  }
+
+  val userTable: KTable[MaxwellKey, MaxwellData] = maxwellInputTable.filter(TableFilter("users"))
+
+  mxKT
+    .join(userTable, userMapper, null, userJoiner)
+    .join(tfeAggregateTable, tfeJoiner)
+    .to("maxwell-join-final-tickets", keySer, mxDataSer)
 
   builder.stream(keyDeser, mxDataDeser, "maxwell-join-final-tickets").map(
     new KeyValueMapper[MaxwellKey, MaxwellData, KeyValue[MaxwellKey, MaxwellData]]() {

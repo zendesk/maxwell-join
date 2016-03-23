@@ -11,7 +11,7 @@ import org.apache.kafka.streams.kstream._
 import org.apache.kafka.streams._
 import org.apache.kafka.streams.kstream.internals.KStreamImpl
 import org.apache.kafka.streams.processor._
-import org.apache.kafka.streams.state.Stores
+import org.apache.kafka.streams.state.{KeyValueStore, Stores}
 
 import scala.collection.immutable.HashMap
 
@@ -37,10 +37,49 @@ case class TableFilter(table: String) extends BasicProcessorSupplier[MaxwellKey,
     if ( key.table == table ) context.forward(key, value)
 )
 
+trait DenormalizeProcessor extends AbstractProcessor[MaxwellKey, MaxwellData] {
+  var dataStore : KeyValueStore[MaxwellKey, MaxwellData] = null
+  var linkStore : KeyValueStore[MaxwellKey, Set[MaxwellKey]] = null
 
+  override def init(context: ProcessorContext): Unit = {
+    super.init(context)
+    dataStore = context.getStateStore("maxwell-data").asInstanceOf[KeyValueStore[MaxwellKey, MaxwellData]]
+    linkStore = context.getStateStore("maxwell-links").asInstanceOf[KeyValueStore[MaxwellKey, Set[MaxwellKey]]]
+  }
 
+  protected def processHasOne(key: MaxwellKey, data: MaxwellData, field: String, ref: Tuple3[String, String, String]) = {
+    val (refName, table, refField) = ref
 
-case class RootTableProcessor[K, V]()
+    data.get(field).map { refValue =>
+      val newKey = MaxwellKey(key.database, table, List(Map(refField -> refValue)))
+      dataStore.get(newKey) match {
+        case d: MaxwellData => data + (refName -> d)
+        case _ => data + (refName -> null)
+      }
+    }.getOrElse(data)
+  }
+
+}
+case class TicketsTableProcessorSupplier() extends ProcessorSupplier[MaxwellKey, MaxwellData] {
+  override def get(): Processor[MaxwellKey, MaxwellData] = TicketsTableProcessor()
+  case class TicketsTableProcessor() extends DenormalizeProcessor {
+    override def process(key: MaxwellKey, data: MaxwellData): Unit = {
+      dataStore.put(key, data)
+      var joined = processHasOne(key, data, "requester_id", ("requester", "users", "id"))
+      joined = processHasOne(key, joined, "assignee_id", ("assignee", "users", "id"))
+      context.forward(key, joined)
+    }
+  }
+}
+
+case class UsersTableProcessorSupplier() extends ProcessorSupplier[MaxwellKey, MaxwellData] {
+  override def get(): Processor[MaxwellKey, MaxwellData] = UsersTableProcessor()
+  case class UsersTableProcessor() extends DenormalizeProcessor {
+    override def process(key: MaxwellKey, data: MaxwellData): Unit = {
+      dataStore.put(key, data)
+    }
+  }
+}
 
 object MaxwellJoin extends App {
 
@@ -87,34 +126,36 @@ object MaxwellJoin extends App {
   val mxDataSer   = JsonSerializer[MaxwellData]()
   val mxDataDeser = JsonDeserializer[MaxwellData]()
 
+  val dataStore = Stores.create("maxwell-data")
+    .withKeys(keySer, keyDeser)
+    .withValues(mxDataSer, mxDataDeser)
+    .persistent()
+    .build()
+
+  val linkageStore = Stores.create("maxwell-links")
+    .withKeys(keySer, keyDeser)
+    .withValues(JsonSerializer[Set[MaxwellKey]], JsonDeserializer[Set[MaxwellKey]])
+    .persistent()
+    .build()
 
   builder.addSource("maxwell-root", keyDeser, valDeser, "maxwell")
-
 
   val liftDataPSupplier = new BasicProcessorSupplier[MaxwellKey, MaxwellValue](
     (context, k, v) => context.forward(k, v.data)
   )
 
   builder.addProcessor("maxwell-data", liftDataPSupplier, "maxwell-root")
+
   builder.addProcessor("maxwell-tickets", TableFilter("tickets"), "maxwell-data")
+  builder.addProcessor("maxwell-join-tickets", TicketsTableProcessorSupplier(), "maxwell-tickets")
+  builder.addSink("maxwell-join-tickets-output", "maxwell-tickets", keySer, mxDataSer, "maxwell-join-tickets")
+
   builder.addProcessor("maxwell-users", TableFilter("users"), "maxwell-data")
+  builder.addProcessor("maxwell-join-users", UsersTableProcessorSupplier(), "maxwell-users")
 
-  val dataStore = Stores.create("maxwell-data")
-    .withKeys(keySer, keyDeser)
-    .withValues(valSer, valDeser)
-    .persistent()
-    .build()
+  builder.addStateStore(dataStore,    "maxwell-join-tickets")
+  builder.addStateStore(linkageStore, "maxwell-join-tickets")
 
-  val linkageStore = Stores.create("maxwell-links")
-    .withKeys(keySer, keyDeser)
-    .withValues(JsonSerializer[List[MaxwellKey]], JsonDeserializer[List[MaxwellKey]])
-    .persistent()
-    .build()
-
-  /*
-  builder.addStateStore(dataStore,    "maxwell-join-tickets", "maxwell-join-users")
-  builder.addStateStore(linkageStore, "maxwell-join-tickets", "maxwell-join-users")
-  */
   /*
 
   val maxwellInputTable: KTable[MaxwellKey, MaxwellData] = builder

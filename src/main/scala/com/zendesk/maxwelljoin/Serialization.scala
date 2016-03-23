@@ -1,8 +1,6 @@
 package com.zendesk.maxwelljoin
 
 import java.util
-import com.zendesk.maxwelljoin.mawxwelljoin.MapByID
-import org.apache.kafka.common.errors.SerializationException
 import org.apache.kafka.common.serialization._
 import org.json4s.JsonAST.JString
 import org.json4s.{FieldSerializer, JArray}

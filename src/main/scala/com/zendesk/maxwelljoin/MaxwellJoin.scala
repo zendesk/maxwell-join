@@ -1,8 +1,8 @@
 package com.zendesk.maxwelljoin
 
+
 import java.util
 import java.util.Properties
-import com.zendesk.maxwelljoin.mawxwelljoin.{MaxwellData, MapByID}
 import org.apache.kafka.clients.producer.Partitioner
 import org.apache.kafka.clients.producer.internals.DefaultPartitioner
 import org.apache.kafka.common.Cluster
@@ -10,13 +10,10 @@ import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializ
 import org.apache.kafka.streams.kstream._
 import org.apache.kafka.streams._
 import org.apache.kafka.streams.kstream.internals.KStreamImpl
+import org.apache.kafka.streams.processor._
+import org.apache.kafka.streams.state.Stores
 
 import scala.collection.immutable.HashMap
-
-package object mawxwelljoin {
-  type MaxwellData = Map[String, Any]
-  type MapByID = Map[BigInt, MaxwellData]
-}
 
 case class MaxwellKey(val database: String, val table: String, val pk: List[Map[String, Any]])
 case class MaxwellTableDatabase(val table: String, val database: String)
@@ -24,15 +21,26 @@ case class MaxwellValue(val rowType: String, val database: String, val table: St
                         val ts: BigInt, val xid: BigInt,
                         val data: Map[String, Any])
 
-
-case class TableFilter(table: String) extends Predicate[MaxwellKey, MaxwellData] {
-  override def test(key: MaxwellKey, value: MaxwellData): Boolean = key.table == table
-}
-
 case class MapMaxwellValue() extends ValueMapper[MaxwellValue, MaxwellData] {
   override def apply(value: MaxwellValue) = value.data
 }
 
+class BasicProcessorSupplier[K, V]( f: (ProcessorContext, K, V) => Unit ) extends ProcessorSupplier[K, V] {
+  override def get(): Processor[K, V] = new BasicProcessor(f)
+  class BasicProcessor[K, V](val f: (ProcessorContext, K, V) => Unit) extends AbstractProcessor[K, V] {
+    override def process(key: K, value: V) = f(context, key, value)
+  }
+}
+
+case class TableFilter(table: String) extends BasicProcessorSupplier[MaxwellKey, MaxwellData](
+  (context, key, value) =>
+    if ( key.table == table ) context.forward(key, value)
+)
+
+
+
+
+case class RootTableProcessor[K, V]()
 
 object MaxwellJoin extends App {
 
@@ -47,29 +55,10 @@ object MaxwellJoin extends App {
     settings.put(StreamsConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer])
     settings.put(StreamsConfig.VALUE_DESERIALIZER_CLASS_CONFIG, classOf[StringDeserializer])
     settings.put(StreamsConfig.JOB_ID_CONFIG, "maxwell-joiner")
-    settings.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "docker-vm:9092")
-    settings.put(StreamsConfig.ZOOKEEPER_CONNECT_CONFIG, "docker-vm:2181/kafka")
+    settings.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
+    settings.put(StreamsConfig.ZOOKEEPER_CONNECT_CONFIG, "localhost:2181")
     settings.put("partitioner.class", classOf[MaxwellJoinPartitioner])
     settings
-  }
-
-  val keySer      = MaxwellKeySerializer()
-  val keyDeser    = MaxwellKeyDeserializer()
-  val valSer      = JsonSerializer[MaxwellValue]()
-  val valDeser    = JsonDeserializer[MaxwellValue]()
-  val idMapSer    = JsonSerializer[MapByID]()
-  val idMapDeser  = JsonDeserializer[MapByID]()
-  val mxDataSer   = JsonSerializer[MaxwellData]()
-  val mxDataDeser = JsonDeserializer[MaxwellData]()
-
-  val maxwellInputTable: KTable[MaxwellKey, MaxwellData] = builder
-    .table(keySer, valSer, keyDeser, valDeser, "maxwell")
-    .mapValues(MapMaxwellValue())
-
-  class TicketFieldAggregator extends Aggregator[MaxwellKey, MapByID, MapByID] {
-    override def apply(aggKey: MaxwellKey, value: MapByID, aggregate: MapByID): MapByID = {
-      aggregate ++ value
-    }
   }
 
   class MaxwellJoinPartitioner extends DefaultPartitioner {
@@ -87,6 +76,57 @@ object MaxwellJoin extends App {
       }
     }
   }
+
+
+  val keySer      = MaxwellKeySerializer()
+  val keyDeser    = MaxwellKeyDeserializer()
+  val valSer      = JsonSerializer[MaxwellValue]()
+  val valDeser    = JsonDeserializer[MaxwellValue]()
+  val idMapSer    = JsonSerializer[MapByID]()
+  val idMapDeser  = JsonDeserializer[MapByID]()
+  val mxDataSer   = JsonSerializer[MaxwellData]()
+  val mxDataDeser = JsonDeserializer[MaxwellData]()
+
+
+  builder.addSource("maxwell-root", keyDeser, valDeser, "maxwell")
+
+
+  val liftDataPSupplier = new BasicProcessorSupplier[MaxwellKey, MaxwellValue](
+    (context, k, v) => context.forward(k, v.data)
+  )
+
+  builder.addProcessor("maxwell-data", liftDataPSupplier, "maxwell-root")
+  builder.addProcessor("maxwell-tickets", TableFilter("tickets"), "maxwell-data")
+  builder.addProcessor("maxwell-users", TableFilter("users"), "maxwell-data")
+
+  val dataStore = Stores.create("maxwell-data")
+    .withKeys(keySer, keyDeser)
+    .withValues(valSer, valDeser)
+    .persistent()
+    .build()
+
+  val linkageStore = Stores.create("maxwell-links")
+    .withKeys(keySer, keyDeser)
+    .withValues(JsonSerializer[List[MaxwellKey]], JsonDeserializer[List[MaxwellKey]])
+    .persistent()
+    .build()
+
+  /*
+  builder.addStateStore(dataStore,    "maxwell-join-tickets", "maxwell-join-users")
+  builder.addStateStore(linkageStore, "maxwell-join-tickets", "maxwell-join-users")
+  */
+  /*
+
+  val maxwellInputTable: KTable[MaxwellKey, MaxwellData] = builder
+    .table(keySer, valSer, keyDeser, valDeser, "maxwell")
+    .mapValues(MapMaxwellValue())
+
+  class TicketFieldAggregator extends Aggregator[MaxwellKey, MapByID, MapByID] {
+    override def apply(aggKey: MaxwellKey, value: MapByID, aggregate: MapByID): MapByID = {
+      aggregate ++ value
+    }
+  }
+
 
   val aggregateStream = maxwellInputTable
     .toStream()
@@ -140,7 +180,7 @@ object MaxwellJoin extends App {
       }
     }
   )
-
+*/
   val stream: KafkaStreams = new KafkaStreams(builder, streamingConfig)
   stream.start()
 }

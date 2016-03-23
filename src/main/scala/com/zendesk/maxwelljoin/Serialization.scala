@@ -3,7 +3,7 @@ package com.zendesk.maxwelljoin
 import java.util
 import org.apache.kafka.common.serialization._
 import org.json4s.JsonAST.JString
-import org.json4s.{FieldSerializer, JArray}
+import org.json4s.{JValue, FieldSerializer, JArray}
 import org.json4s.FieldSerializer._
 import org.json4s.native.parseJson
 import org.json4s.native.Serialization.write
@@ -27,18 +27,49 @@ abstract trait BasicSerializer[T] extends Serializer[T] with SerializationFormat
 }
 
 case class MaxwellKeyDeserializer() extends BasicDeserializer[MaxwellKey] {
-  override def deserialize(topic: String, data: Array[Byte]): MaxwellKey = {
-    val JArray(List(JString(db), JString(tbl), JArray(pkList))) = parseJson(new String(data))
+  def extract(obj: List[JValue]) = {
+    val List(JString(db), JString(tbl), JArray(pkList)) = obj
     val mapList = pkList.map { m => m.extract[Map[String, Any]] }
     MaxwellKey(db, tbl, mapList)
+  }
+
+  override def deserialize(topic: String, data: Array[Byte]): MaxwellKey = {
+    val JArray(list) = parseJson(new String(data))
+    extract(list)
   }
 }
 
 case class MaxwellKeySerializer() extends BasicSerializer[MaxwellKey] {
+  def toList(key: MaxwellKey) = {
+    List(key.database, key.table, key.pk)
+  }
+
   override def serialize(topic: String, key: MaxwellKey) = {
-    write(List(key.database, key.table, key.pk)).getBytes
+    write(toList(key)).getBytes
   }
 }
+
+case class MaxwellLinkKeySerializer() extends BasicSerializer[MaxwellLinkKey] {
+  val mks = MaxwellKeySerializer()
+  override def serialize(topic: String, linkKey: MaxwellLinkKey) = {
+    write(List(mks.toList(linkKey.from), linkKey.toTable)).getBytes
+  }
+}
+
+case class MaxwellLinkKeyDeserializer() extends BasicDeserializer[MaxwellLinkKey] {
+  val mkd = MaxwellKeyDeserializer()
+
+  override def deserialize(topic: String, bytes: Array[Byte]): MaxwellLinkKey = {
+    val JArray(list) = parseJson(new String(bytes))
+
+    val JArray(fromKey) = list(0)
+    val JString(toTable) = list(1)
+    val key = mkd.extract(fromKey)
+
+    MaxwellLinkKey(key, toTable)
+  }
+}
+
 case class JsonSerializer[T <: AnyRef](implicit val manifest: Manifest[T]) extends BasicSerializer[T] {
   override def serialize(topic: String, obj: T): Array[Byte] = {
     if ( obj == null )

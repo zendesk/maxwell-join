@@ -23,12 +23,12 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
   def createIndexEntry(key: MaxwellKey, field: String, value: Any): Unit = {
     // database, table,   field,        value -> Set(MaxwellKey)
     // ...     , tickets, requester_id->5     -> [ticket id 100, tickets 101]
-    val refKey = MaxwellKey(key.database, key.table, List((field -> value)))
-    val maybeRefSet = Option(indexStore.get(refKey))
+    val indexKey = MaxwellKey(key.database, key.table, List((field -> value)))
+    val maybeDataKeySet = Option(indexStore.get(indexKey))
 
-    if (maybeRefSet.isEmpty || !maybeRefSet.get.contains(key.fields)) {
-      val newSet = maybeRefSet.getOrElse(Set()) + key.fields
-      indexStore.put(refKey, newSet)
+    if (maybeDataKeySet.isEmpty || !maybeDataKeySet.get.contains(key.fields)) {
+      val newSet = maybeDataKeySet.getOrElse(Set()) + key.fields
+      indexStore.put(indexKey, newSet)
     }
   }
 
@@ -36,11 +36,11 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
     tableInfo.getPKFields(database, table) == Some(List(field))
   }
 
-  def lookupDataByPK(key: MaxwellKey) = {
+  private def lookupDataByPK(key: MaxwellKey) = {
     Option(dataStore.get(key))
   }
 
-  def lookupDataByIndex(indexKey: MaxwellKey) = {
+  private def lookupDataByIndex(indexKey: MaxwellKey) = {
     /* indirect lookup: go through the indexStore to get a list of data,
      * eg lookup ticket_field_entries by ticket_id */
     val maybeIndexSet = Option(indexStore.get(indexKey))
@@ -62,32 +62,39 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
     }
   }
 
-  def processJoin(key: MaxwellKey, data: MaxwellData, join: JoinDef) : Option[MaxwellData] = {
-    data.get(join.thisField).flatMap { refValue =>
+  def processRightPointingJoin(key: MaxwellKey, data: MaxwellData, join: JoinDef): MaxwellData = {
+    data.get(join.thisField).map { refValue =>
+      if (!isPK(key.database, key.table, join.thisField))
+        createIndexEntry(key, join.thisField, refValue)
+
+      val isJoinToPK = isPK(key.database, join.thatTable, join.thatField)
+      val joinData = getJoinData(key, refValue, join, isJoinToPK)
+
+      if (isJoinToPK) {
+        // has-one
+        data + (join.thatAlias -> joinData.headOption.map(_._2))
+      } else {
+        // has-many
+        data + (join.thatAlias -> joinData.map(_._2))
+      }
+    }.getOrElse(data)
+  }
+
+  def processLeftPointingJoin(key: MaxwellKey, data: MaxwellData, join: JoinDef): Unit = {
+    data.get(join.thisField).map { refValue =>
       if ( !isPK(key.database, key.table, join.thisField))
         createIndexEntry(key, join.thisField, refValue)
 
       val isJoinToPK = isPK(key.database, join.thatTable, join.thatField)
       val joinData = getJoinData(key, refValue, join, isJoinToPK)
 
-      if ( join.pointsRight ) {
-        if ( isJoinToPK ) {
-          // has-one
-          Some(data + (join.thatAlias -> joinData.headOption.map(_._2)))
-        } else {
-          // has-many
-          Some(data + (join.thatAlias -> joinData.map(_._2)))
-        }
-      } else {
         /*
            we've put ourselves into the data store, now re-output
            the left hand records by sending them through as a virtual update
          */
-        joinData.foreach { case (k, d) =>
-          val mValue = MaxwellValue("update", key.database, join.thatTable, System.currentTimeMillis() / 1000, 123, d)
-          context.forward(k, mValue)
-        }
-        None
+      joinData.foreach { case (k, d) =>
+        val mValue = MaxwellValue("update", key.database, join.thatTable, System.currentTimeMillis() / 1000, 123, d)
+        context.forward(k, mValue)
       }
     }
   }
@@ -96,18 +103,18 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
     dataStore.put(key, value.data)
     tableInfo.setPKFields(key.database, key.table, key.pkFields)
 
-    var data = value.data
-    var mainRowChanged = false
+    val (rights, lefts) = joinDefs.partition(_.pointsRight)
 
-    joinDefs.foreach { j =>
-      processJoin(key, data, j).map { d =>
-        data = d
-        mainRowChanged = true
-      }
+
+
+    val newData = rights.foldRight(value.data) { (join, data) =>
+      processRightPointingJoin(key, data, join)
     }
 
-    if ( mainRowChanged ) {
-      context.forward(key, data)
+    lefts.foreach(processLeftPointingJoin(key, newData, _))
+
+    if ( rights.size > 0 ) {
+      context.forward(key, newData)
     }
   }
 }

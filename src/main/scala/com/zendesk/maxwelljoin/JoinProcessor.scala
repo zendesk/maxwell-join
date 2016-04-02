@@ -15,31 +15,7 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
     mdStore   = context.getStateStore(MaxwellJoin.MetadataStoreName).asInstanceOf[KeyValueStore[DBAndTable, List[String]]]
   }
 
-  val pkFields = collection.mutable.Map[DBAndTable, List[String]]()
-
-  def getPKFields(db: String, table: String): Option[List[String]] = {
-    val key = DBAndTable(db, table)
-    val value = pkFields.get(key)
-
-    if ( value.isDefined ) {
-      return value
-    }
-
-    Option(mdStore.get(key)).map { v =>
-      pkFields.put(key, v)
-      v
-    }
-  }
-
-  def setPKFields(db: String, table: String, fields: List[String]): Unit = {
-    val key = DBAndTable(db, table)
-    val value = pkFields.get(key)
-    if ( value.isDefined && value.get == fields )
-      return
-
-    mdStore.put(key, fields)
-    pkFields.put(key, fields)
-  }
+  lazy private val tableInfo = TableInformation(mdStore)
 
   // if join field is not the same as the primary key, store
   // join field -> primary key reference
@@ -57,7 +33,7 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
   }
 
   def isPK(database: String, table: String, field: String) = {
-    getPKFields(database, table) == Some(List(field))
+    tableInfo.getPKFields(database, table) == Some(List(field))
   }
 
   def lookupDataByPK(key: MaxwellKey) = {
@@ -118,7 +94,7 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
 
   override def process(key: MaxwellKey, value: MaxwellValue): Unit = {
     dataStore.put(key, value.data)
-    setPKFields(key.database, key.table, key.pkFields)
+    tableInfo.setPKFields(key.database, key.table, key.pkFields)
 
     var data = value.data
     var mainRowChanged = false

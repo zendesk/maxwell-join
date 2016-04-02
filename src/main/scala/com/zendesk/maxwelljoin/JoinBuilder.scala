@@ -4,6 +4,7 @@ import org.apache.kafka.common.serialization.{ StringSerializer, StringDeseriali
 import org.apache.kafka.streams.kstream.KStreamBuilder
 import org.apache.kafka.streams.processor.ProcessorSupplier
 import org.apache.kafka.streams.state.Stores
+import scala.language.implicitConversions
 
 case class JoinDef(val thisField: String, val thatTable: String,
                    val thatAlias: String, val thatField: String,
@@ -55,14 +56,21 @@ class JoinBuilder(builder: KStreamBuilder, baseTable: String, sourceTopic: Strin
     })
   }
 
-  def join(thisField: String, thatTable: String, thatAlias: String, thatField: String) = {
-    val thisPS = getJoinProcessorSupplier(baseTable)
+  def join(thisTable: String, thisField: String, thatTable: String, thatField: String, thatAlias: String): Unit = {
+    val thisPS = getJoinProcessorSupplier(thisTable)
     val thatPS = getJoinProcessorSupplier(thatTable)
 
     thisPS.join(thisField, thatTable, thatAlias, thatField, true)
-    thatPS.join(thatField, baseTable, "", thisField, false)
+    thatPS.join(thatField, thisTable, "", thisField, false)
 
     thisPS.upstreams = thatPS.processorName :: thisPS.upstreams
+  }
+
+  def join(from: String, to: String, as: String = null): Unit = {
+    val List(fromTable, fromField) = from.split("\\.").toList
+    val List(toTable, toField) = to.split("\\.").toList
+
+    join(fromTable, fromField, toTable, toField, Option(as).getOrElse(toTable))
   }
 
   def build = {

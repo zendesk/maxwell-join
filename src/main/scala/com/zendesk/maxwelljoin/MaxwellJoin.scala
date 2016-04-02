@@ -7,6 +7,7 @@ import org.apache.kafka.streams.kstream._
 import org.apache.kafka.streams._
 import org.apache.kafka.streams.processor._
 import org.apache.kafka.streams.state.{KeyValueStore, Stores}
+import scala.language.implicitConversions
 
 
 case class MaxwellKey(val database: String, val table: String, val fields: MaxwellRef) {
@@ -53,9 +54,8 @@ object MaxwellJoin extends App {
   }
 
   val joinBuilder = new JoinBuilder(builder, "tickets", "maxwell", "maxwell-tickets")
-
-  joinBuilder.join("requester_id", "users", "requester", "id")
-  joinBuilder.join("id", "ticket_field_entries", "ticket_field_entries", "ticket_id")
+  joinBuilder.join(from = "tickets.requester_id", to = "users.id", as = "requester")
+  joinBuilder.join(from = "tickets.id", to = "ticket_field_entries.ticket_id")
   joinBuilder.build
 
   val stream: KafkaStreams = new KafkaStreams(builder, streamingConfig)

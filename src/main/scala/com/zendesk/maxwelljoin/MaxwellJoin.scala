@@ -17,7 +17,7 @@ case class MaxwellKey(val database: String, val table: String, val fields: Maxwe
 
 case class MaxwellValue(val rowType: String, val database: String, val table: String,
                         val ts: BigInt, val xid: BigInt,
-                        val data: Map[String, Any])
+                        val data: Map[String, Any], val old: Option[Map[String, Any]])
 case class DBAndTable(val db: String, val table: String)
 
 class BasicProcessorSupplier[K, V]( f: (ProcessorContext, K, V) => Unit ) extends ProcessorSupplier[K, V] {

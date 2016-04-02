@@ -2,19 +2,37 @@ package com.zendesk.maxwelljoin
 
 import java.util
 import org.apache.kafka.common.serialization._
-import org.json4s.JsonAST.JString
-import org.json4s.{JValue, FieldSerializer, JArray}
+import org.json4s.JsonAST.{JField, JObject, JString}
+import org.json4s.{CustomSerializer, JValue, FieldSerializer, JArray}
 import org.json4s.FieldSerializer._
 import org.json4s.native.parseJson
 import org.json4s.native.Serialization.write
+import org.json4s.Extraction.decompose
 import scala.language.implicitConversions
+
+class MaxwellKeySerializer extends CustomSerializer[MaxwellKey]( format => (
+    {
+      case JArray(List(JString(db), JString(tbl), JArray(rawList))) =>
+        implicit val formats = org.json4s.DefaultFormats
+        val mapList = rawList.map { m => m.extract[Map[String, Any]] }
+        val pkList = mapList.map { m => (m.keys.toList(0), m.values.toList(0)) }
+        MaxwellKey(db, tbl, pkList)
+    },
+    {
+      case k: MaxwellKey =>
+        implicit val formats = org.json4s.DefaultFormats
+        decompose(List(k.database, k.table, k.fields.map { pk => Map(pk._1 -> pk._2)}))
+    }
+  )
+)
 
 trait SerializationFormats {
   val renameMaxwellRowType = FieldSerializer[MaxwellValue](
     renameTo("rowType", "type"),
     renameFrom("type", "rowType")
   )
-  implicit val formats = org.json4s.DefaultFormats + renameMaxwellRowType
+
+  implicit val formats = org.json4s.DefaultFormats + renameMaxwellRowType + new MaxwellKeySerializer()
 }
 abstract trait BasicDeserializer[T] extends Deserializer[T] with SerializationFormats {
   def close(): Unit = {}
@@ -24,50 +42,6 @@ abstract trait BasicDeserializer[T] extends Deserializer[T] with SerializationFo
 abstract trait BasicSerializer[T] extends Serializer[T] with SerializationFormats {
   def close(): Unit = {}
   def configure(map: util.Map[String, _], b: Boolean): Unit = {}
-}
-
-case class MaxwellKeyDeserializer() extends BasicDeserializer[MaxwellKey] {
-  def extract(obj: List[JValue]) = {
-    val List(JString(db), JString(tbl), JArray(pkList)) = obj
-    val mapList = pkList.map { m => m.extract[Map[String, Any]] }
-    MaxwellKey(db, tbl, mapList)
-  }
-
-  override def deserialize(topic: String, data: Array[Byte]): MaxwellKey = {
-    val JArray(list) = parseJson(new String(data))
-    extract(list)
-  }
-}
-
-case class MaxwellKeySerializer() extends BasicSerializer[MaxwellKey] {
-  def toList(key: MaxwellKey) = {
-    List(key.database, key.table, key.pk)
-  }
-
-  override def serialize(topic: String, key: MaxwellKey) = {
-    write(toList(key)).getBytes
-  }
-}
-
-case class MaxwellLinkKeySerializer() extends BasicSerializer[MaxwellLinkKey] {
-  val mks = MaxwellKeySerializer()
-  override def serialize(topic: String, linkKey: MaxwellLinkKey) = {
-    write(List(mks.toList(linkKey.from), linkKey.toTable)).getBytes
-  }
-}
-
-case class MaxwellLinkKeyDeserializer() extends BasicDeserializer[MaxwellLinkKey] {
-  val mkd = MaxwellKeyDeserializer()
-
-  override def deserialize(topic: String, bytes: Array[Byte]): MaxwellLinkKey = {
-    val JArray(list) = parseJson(new String(bytes))
-
-    val JArray(fromKey) = list(0)
-    val JString(toTable) = list(1)
-    val key = mkd.extract(fromKey)
-
-    MaxwellLinkKey(key, toTable)
-  }
 }
 
 case class JsonSerializer[T <: AnyRef](implicit val manifest: Manifest[T]) extends BasicSerializer[T] {

@@ -34,17 +34,12 @@ trait SerializationFormats {
 
   implicit val formats = org.json4s.DefaultFormats + renameMaxwellRowType + new MaxwellKeySerializer()
 }
-abstract trait BasicDeserializer[T] extends Deserializer[T] with SerializationFormats {
+
+case class JsonSerializer[T <: AnyRef](implicit val manifest: Manifest[T])
+  extends Serializer[T] with SerializationFormats {
   def close(): Unit = {}
   def configure(map: util.Map[String, _], b: Boolean): Unit = {}
-}
 
-abstract trait BasicSerializer[T] extends Serializer[T] with SerializationFormats {
-  def close(): Unit = {}
-  def configure(map: util.Map[String, _], b: Boolean): Unit = {}
-}
-
-case class JsonSerializer[T <: AnyRef](implicit val manifest: Manifest[T]) extends BasicSerializer[T] {
   override def serialize(topic: String, obj: T): Array[Byte] = {
     if ( obj == null )
       return null
@@ -53,7 +48,11 @@ case class JsonSerializer[T <: AnyRef](implicit val manifest: Manifest[T]) exten
   }
 }
 
-case class JsonDeserializer[T >: Null](implicit val manifest: Manifest[T]) extends BasicDeserializer[T] {
+case class JsonDeserializer[T >: Null](implicit val manifest: Manifest[T])
+  extends Deserializer[T] with SerializationFormats {
+  def close(): Unit = {}
+  def configure(map: util.Map[String, _], b: Boolean): Unit = {}
+
   override def deserialize(s: String, bytes: Array[Byte]): T = {
     if ( bytes == null ) return null
     parseJson(new String(bytes)).extract[T]

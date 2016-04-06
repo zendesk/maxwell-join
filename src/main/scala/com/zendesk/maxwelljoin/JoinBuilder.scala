@@ -40,25 +40,25 @@ class JoinBuilder(builder: KStreamBuilder, baseTable: String, sourceTopic: Strin
   builder.addStateStore(linkageStore)
   builder.addStateStore(metadataStore)
 
-  val joinProcessorSuppliers = collection.mutable.Map[String, JoinProcessorSupplier]()
-  var processSupplierChain = List[JoinProcessorSupplier]()
+  val joinProcessorSuppliers = collection.mutable.Map[String, UpdateProcessorSupplier]()
+  var processSupplierChain = List[UpdateProcessorSupplier]()
 
   builder.addSource("maxwell-join-root", keyDeser, valDeser, sourceTopic)
 
-  private val basePS = getJoinProcessorSupplier(baseTable)
+  private val basePS = getUpdateProcessorSupplier(baseTable)
 
-  private def getJoinProcessorSupplier(table: String) = {
+  private def getUpdateProcessorSupplier(table: String) = {
     joinProcessorSuppliers.getOrElseUpdate(table, {
       builder.addProcessor(s"maxwell-join-filter-$table", TableFilter(table), "maxwell-join-root")
-      val ps = JoinProcessorSupplier(table, List(s"maxwell-join-filter-$table"))
+      val ps = UpdateProcessorSupplier(table, List(s"maxwell-join-filter-$table"))
       processSupplierChain = ps :: processSupplierChain
       ps
     })
   }
 
   def join(thisTable: String, thisField: String, thatTable: String, thatField: String, thatAlias: String): Unit = {
-    val thisPS = getJoinProcessorSupplier(thisTable)
-    val thatPS = getJoinProcessorSupplier(thatTable)
+    val thisPS = getUpdateProcessorSupplier(thisTable)
+    val thatPS = getUpdateProcessorSupplier(thatTable)
 
     thisPS.join(thisField, thatTable, thatAlias, thatField, true)
     thatPS.join(thatField, thisTable, "", thisField, false)
@@ -91,9 +91,9 @@ class JoinBuilder(builder: KStreamBuilder, baseTable: String, sourceTopic: Strin
   }
 }
 
-case class JoinProcessorSupplier(val baseTable: String, var upstreams: List[String]) extends ProcessorSupplier[MaxwellKey, MaxwellValue] {
+case class UpdateProcessorSupplier(val baseTable: String, var upstreams: List[String]) extends ProcessorSupplier[MaxwellKey, MaxwellValue] {
   var joinDefs = List[JoinDef]()
-  override def get() = new JoinProcessor(joinDefs)
+  override def get() = new UpdateProcessor(joinDefs)
 
   def join(thisField: String, thatTable: String, thatAlias: String, thatField: String, pointsRight: Boolean) = {
     joinDefs = joinDefs :+ JoinDef(thisField, thatTable, thatAlias, thatField, pointsRight)

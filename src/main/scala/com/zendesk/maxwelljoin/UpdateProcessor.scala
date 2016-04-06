@@ -3,7 +3,7 @@ package com.zendesk.maxwelljoin
 import org.apache.kafka.streams.processor.{ProcessorContext, AbstractProcessor}
 import org.apache.kafka.streams.state.KeyValueStore
 
-class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKey, MaxwellValue] {
+class UpdateProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKey, MaxwellValue] {
   var dataStore: KeyValueStore[MaxwellKey, MaxwellData] = null
   var idxStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]] = null
   var mdStore:   KeyValueStore[DBAndTable, List[String]] = null

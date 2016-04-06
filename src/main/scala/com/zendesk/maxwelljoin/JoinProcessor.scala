@@ -3,7 +3,7 @@ package com.zendesk.maxwelljoin
 import org.apache.kafka.streams.processor.{ProcessorContext, AbstractProcessor}
 import org.apache.kafka.streams.state.KeyValueStore
 
-class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKey, MaxwellValue] {
+class JoinProcessor(joinDefs: List[JoinDef], val rootProcessor: Boolean) extends AbstractProcessor[MaxwellKey, MaxwellValue] {
   var dataStore: KeyValueStore[MaxwellKey, MaxwellData] = null
   var indexStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]] = null
   var mdStore:   KeyValueStore[DBAndTable, List[String]] = null
@@ -81,9 +81,6 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
 
   def processRightPointingJoin(key: MaxwellKey, data: MaxwellData, join: JoinDef): MaxwellData = {
     data.get(join.thisField).map { refValue =>
-      if (!isPK(key.database, key.table, join.thisField))
-        createIndexEntry(key, join.thisField, refValue)
-
       val isJoinToPK = isPK(key.database, join.thatTable, join.thatField)
       val joinData = getJoinData(key, refValue, join, isJoinToPK)
 
@@ -97,23 +94,7 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
     }.getOrElse(data)
   }
 
-  def processLeftPointingJoin(key: MaxwellKey, data: MaxwellData, join: JoinDef): Unit = {
-    data.get(join.thisField).map { refValue =>
-      val isJoinToPK = isPK(key.database, join.thatTable, join.thatField)
-      val joinData = getJoinData(key, refValue, join, isJoinToPK)
-
-        /*
-           we've put ourselves into the data store, now re-output
-           the left hand records by sending them through as a virtual update
-         */
-      joinData.foreach { case (k, d) =>
-        val mValue = MaxwellValue("replay", key.database, join.thatTable, System.currentTimeMillis() / 1000, 123, d, None)
-        context.forward(k, mValue)
-      }
-    }
-  }
-
-  def getLeftHandReplays(key: MaxwellKey, data: MaxwellData): Set[MaxwellKey] = {
+  def getReplays(key: MaxwellKey, data: MaxwellData): Set[MaxwellKey] = {
     leftHandJoins.foldLeft(Set[MaxwellKey]()) { (set, join) =>
       data.get(join.thisField).map { joinValue =>
         val lookupKey = MaxwellKey(key.database, join.thatTable, List(join.thatField -> joinValue))
@@ -146,31 +127,31 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
   private def processInsert(key: MaxwellKey, value: MaxwellValue) = {
     dataStore.put(key, value.data)
     createIndexEntries(key, value)
-    getLeftHandReplays(key, value.data)
+    getReplays(key, value.data)
   }
 
   private def processUpdate(key: MaxwellKey, value: MaxwellValue) = {
     dataStore.put(key, value.data)
 
-    val oldReplays = getLeftHandReplays(key, value.old.get)
+    val oldReplays = getReplays(key, value.old.get)
 
     removeOldIndexEntries(key, value.old.get)
 
     createIndexEntries(key, value)
 
-    oldReplays ++: getLeftHandReplays(key, value.data)
+    oldReplays ++: getReplays(key, value.data)
   }
 
   private def processDelete(key: MaxwellKey, value: MaxwellValue) = {
     dataStore.delete(key)
-    val oldReplays = getLeftHandReplays(key, value.data)
+    val oldReplays = getReplays(key, value.data)
 
     removeOldIndexEntries(key, value.data)
     oldReplays
   }
 
   private def processReplay(key: MaxwellKey, value: MaxwellValue) = {
-    getLeftHandReplays(key, value.data)
+    getReplays(key, value.data)
   }
 
   def leftHandJoins  = joinDefs.filterNot(_.pointsRight)
@@ -191,6 +172,7 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKe
 
     val newData = rightHandJoins.foldRight(value.data) { (join, data) =>
       processRightPointingJoin(key, data, join)
+
     }
 
     replays.foreach { replay =>

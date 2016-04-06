@@ -3,19 +3,20 @@ package com.zendesk.maxwelljoin
 import org.apache.kafka.streams.processor.{ProcessorContext, AbstractProcessor}
 import org.apache.kafka.streams.state.KeyValueStore
 
-class JoinProcessor(joinDefs: List[JoinDef], val rootProcessor: Boolean) extends AbstractProcessor[MaxwellKey, MaxwellValue] {
+class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKey, MaxwellValue] {
   var dataStore: KeyValueStore[MaxwellKey, MaxwellData] = null
-  var indexStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]] = null
+  var idxStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]] = null
   var mdStore:   KeyValueStore[DBAndTable, List[String]] = null
 
   override def init(context: ProcessorContext): Unit = {
     super.init(context)
     dataStore = context.getStateStore(MaxwellJoin.DataStoreName).asInstanceOf[KeyValueStore[MaxwellKey, MaxwellData]]
-    indexStore = context.getStateStore(MaxwellJoin.LinkStoreName).asInstanceOf[KeyValueStore[MaxwellKey, Set[MaxwellRef]]]
+    idxStore = context.getStateStore(MaxwellJoin.LinkStoreName).asInstanceOf[KeyValueStore[MaxwellKey, Set[MaxwellRef]]]
     mdStore   = context.getStateStore(MaxwellJoin.MetadataStoreName).asInstanceOf[KeyValueStore[DBAndTable, List[String]]]
   }
 
   lazy private val tableInfo = TableInformation(mdStore)
+  lazy private val indexStore = IndexStore(dataStore, idxStore)
 
 
   private def indexKey(key: MaxwellKey, field: String, value: Any) =
@@ -24,24 +25,22 @@ class JoinProcessor(joinDefs: List[JoinDef], val rootProcessor: Boolean) extends
   def removeIndexEntry(key: MaxwellKey, field: String, value: Any): Unit = {
     val idxKey = indexKey(key, field, value)
 
-    val dataKeySet = Option(indexStore.get(idxKey)).getOrElse(Set()) - key.fields
+    val dataKeySet = Option(idxStore.get(idxKey)).getOrElse(Set()) - key.fields
 
     if ( dataKeySet.isEmpty )
-      indexStore.delete(idxKey)
+      idxStore.delete(idxKey)
     else
-      indexStore.put(idxKey, dataKeySet)
+      idxStore.put(idxKey, dataKeySet)
   }
 
-  // if join field is not the same as the primary key, store
-  // join field -> primary key reference
+  // store join field -> primary key reference, ie
+  // tickets.requester_id: 5 -> ticket 1, ticket 2
   def createIndexEntry(key: MaxwellKey, field: String, value: Any): Unit = {
-    // database, table,   field,        value -> Set(MaxwellKey)
-    // ...     , tickets, requester_id->5     -> [ticket id 100, tickets 101]
-    val maybeDataKeySet = Option(indexStore.get(indexKey(key, field, value)))
+    val maybeDataKeySet = Option(idxStore.get(indexKey(key, field, value)))
 
     if (maybeDataKeySet.isEmpty || !maybeDataKeySet.get.contains(key.fields)) {
       val newSet = maybeDataKeySet.getOrElse(Set()) + key.fields
-      indexStore.put(indexKey(key, field, value), newSet)
+      idxStore.put(indexKey(key, field, value), newSet)
     }
   }
 
@@ -49,40 +48,11 @@ class JoinProcessor(joinDefs: List[JoinDef], val rootProcessor: Boolean) extends
     tableInfo.getPKFields(database, table) == Some(List(field))
   }
 
-  private def lookupDataByPK(key: MaxwellKey) = {
-    Option(dataStore.get(key))
-  }
-
-  private def lookupDataKeysByIndex(indexKey: MaxwellKey) = {
-    Option(indexStore.get(indexKey)).map { refSet =>
-      refSet.map { ref =>
-        MaxwellKey(indexKey.database, indexKey.table, ref)
-      }
-    }.getOrElse(Set())
-  }
-
-  /* indirect lookup: go through the indexStore to get a list of data,
-   * eg lookup ticket_field_entries by ticket_id */
-  private def lookupDataByIndex(indexKey: MaxwellKey) = {
-    lookupDataKeysByIndex(indexKey).toList.flatMap { dataKey =>
-      lookupDataByPK(dataKey).map(dataKey -> _)
-    }
-  }
-
-  def getJoinData(key: MaxwellKey, joinValue: Any, join: JoinDef, isPKLookup: Boolean): List[(MaxwellKey, MaxwellData)] = {
-    val lookupKey = MaxwellKey(key.database, join.thatTable, List(join.thatField -> joinValue))
-
-    if ( isPKLookup ) {
-      lookupDataByPK(lookupKey).map { d => List(lookupKey -> d)}.getOrElse(List())
-    } else {
-      lookupDataByIndex(lookupKey)
-    }
-  }
 
   def processRightPointingJoin(key: MaxwellKey, data: MaxwellData, join: JoinDef): MaxwellData = {
     data.get(join.thisField).map { refValue =>
       val isJoinToPK = isPK(key.database, join.thatTable, join.thatField)
-      val joinData = getJoinData(key, refValue, join, isJoinToPK)
+      val joinData = indexStore.getJoinData(key, refValue, join, isJoinToPK)
 
       if (isJoinToPK) {
         // has-one
@@ -94,6 +64,7 @@ class JoinProcessor(joinDefs: List[JoinDef], val rootProcessor: Boolean) extends
     }.getOrElse(data)
   }
 
+  // returns a set of primary-key lookup keys that should be replayed
   def getReplays(key: MaxwellKey, data: MaxwellData): Set[MaxwellKey] = {
     leftHandJoins.foldLeft(Set[MaxwellKey]()) { (set, join) =>
       data.get(join.thisField).map { joinValue =>
@@ -101,7 +72,7 @@ class JoinProcessor(joinDefs: List[JoinDef], val rootProcessor: Boolean) extends
         if ( isPK(key.database, join.thatTable, join.thatField) )
           set + lookupKey
         else
-          set ++: lookupDataKeysByIndex(lookupKey)
+          set ++: indexStore.getPrimaryKeys(lookupKey)
       }.getOrElse(set)
     }
   }
@@ -176,7 +147,7 @@ class JoinProcessor(joinDefs: List[JoinDef], val rootProcessor: Boolean) extends
     }
 
     replays.foreach { replay =>
-      lookupDataByPK(replay) map { data =>
+      indexStore.getDataByPrimaryKey(replay) map { data =>
         val mValue = MaxwellValue("replay", replay.database, replay.table, System.currentTimeMillis() / 1000, 0, data, None)
         context.forward(replay, mValue)
       }

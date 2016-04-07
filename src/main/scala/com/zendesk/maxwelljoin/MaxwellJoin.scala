@@ -13,6 +13,9 @@ import scala.language.implicitConversions
 case class MaxwellKey(val database: String, val table: String, val fields: MaxwellRef) {
   def pkFields = fields.map(_._1)
   def pkValues = fields.map(_._2)
+
+  def withFields(newFields: MaxwellRef) = MaxwellKey(database, table, newFields)
+  def withFields(newField: (String, Any)) = MaxwellKey(database, table, List(newField))
 }
 
 case class MaxwellValue(val rowType: String, val database: String, val table: String,

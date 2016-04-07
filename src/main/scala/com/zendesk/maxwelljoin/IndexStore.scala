@@ -10,26 +10,44 @@ import org.apache.kafka.streams.state.KeyValueStore
 class IndexStore(dataStore: KeyValueStore[MaxwellKey, MaxwellData],
                  indexStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]]) {
 
-  def getDataByPrimaryKey(key: MaxwellKey) = {
-    Option(dataStore.get(key))
+  def getData(key: MaxwellKey) = Option(dataStore.get(key))
+  def putData(key: MaxwellKey, value: MaxwellData) = dataStore.put(key, value)
+  def delData(key: MaxwellKey): Unit = dataStore.delete(key)
+
+  private def getIndexRef(key: MaxwellKey): Set[MaxwellRef] = {
+    Option(indexStore.get(key)).getOrElse(Set())
   }
 
-  def getPrimaryKeys(indexKey: MaxwellKey) = {
-    Option(indexStore.get(indexKey)).map { refSet =>
-      refSet.map { ref =>
-        MaxwellKey(indexKey.database, indexKey.table, ref)
-      }
-    }.getOrElse(Set())
+  def getIndex(key: MaxwellKey): Set[MaxwellKey] = {
+    getIndexRef(key).map { ref => key.withFields(ref) }
+  }
+
+  def putIndex(key: MaxwellKey, pk: MaxwellRef): Unit = {
+    val indexSet = getIndexRef(key)
+
+    if (!indexSet.contains(pk)) {
+      val newSet = indexSet + pk
+      indexStore.put(key, newSet)
+    }
+  }
+
+
+  def delIndex(key: MaxwellKey, pk: MaxwellRef): Unit = {
+    val indexSet = getIndexRef(key) - pk
+    if ( indexSet.isEmpty )
+      indexStore.delete(key)
+    else
+      indexStore.put(key, indexSet)
   }
 
   def getJoinData(key: MaxwellKey, joinValue: Any, join: JoinDef, isPKLookup: Boolean): List[(MaxwellKey, MaxwellData)] = {
     val lookupKey = MaxwellKey(key.database, join.thatTable, List(join.thatField -> joinValue))
 
     if ( isPKLookup ) {
-      getDataByPrimaryKey(lookupKey).map { d => List(lookupKey -> d)}.getOrElse(List())
+      getData(lookupKey).map { d => List(lookupKey -> d)}.getOrElse(List())
     } else {
-      getPrimaryKeys(key).toList.flatMap { primaryKey =>
-        getDataByPrimaryKey(primaryKey).map(primaryKey -> _)
+      getIndex(key).toList.flatMap { primaryKey =>
+        getData(primaryKey).map(primaryKey -> _)
       }
     }
   }

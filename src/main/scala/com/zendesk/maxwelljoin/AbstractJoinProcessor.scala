@@ -4,9 +4,9 @@ import org.apache.kafka.streams.processor.{AbstractProcessor, ProcessorContext}
 import org.apache.kafka.streams.state.KeyValueStore
 
 abstract class AbstractJoinProcessor extends AbstractProcessor[MaxwellKey, MaxwellValue] {
-  var dataStore: KeyValueStore[MaxwellKey, MaxwellData] = null
-  var idxStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]] = null
-  var mdStore:   KeyValueStore[DBAndTable, List[String]] = null
+  private var dataStore: KeyValueStore[MaxwellKey, MaxwellData] = null
+  private var idxStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]] = null
+  private var mdStore:   KeyValueStore[DBAndTable, List[String]] = null
 
   override def init(context: ProcessorContext): Unit = {
     super.init(context)

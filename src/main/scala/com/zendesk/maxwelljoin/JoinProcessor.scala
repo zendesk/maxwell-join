@@ -18,8 +18,10 @@ class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractJoinProcessor(joinD
           }.getOrElse(d)
         } else {
           val rightData =
-            for ( key <- indexStore.getIndex(lookupKey);
-                rightData <- indexStore.getData(key) ) yield rightData
+            for (
+              key <- indexStore.getIndex(lookupKey);
+              rightData <- indexStore.getData(key)
+            ) yield rightData
 
           val joinedRightData = rightData.map { r => performJoins(join.thatAlias, database, r) }
           d + (join.thatAlias -> joinedRightData)

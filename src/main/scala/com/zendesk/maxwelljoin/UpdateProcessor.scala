@@ -84,10 +84,12 @@ class UpdateProcessor(joinDefs: List[JoinDef], forwardSelf: Boolean) extends Abs
     // do updates
 
     val replays = value.rowType match {
-      case "insert" => processInsert(key, value)
+      case "insert" | "bootstrap-insert" => processInsert(key, value)
       case "update" => processUpdate(key, value)
       case "delete" => processDelete(key, value)
       case "replay" => processReplay(key, value)
+
+      case _ => Set()
     }
 
     replays.foreach { replay =>

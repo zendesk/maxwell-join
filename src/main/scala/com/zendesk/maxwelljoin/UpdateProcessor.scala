@@ -3,22 +3,7 @@ package com.zendesk.maxwelljoin
 import org.apache.kafka.streams.processor.{ProcessorContext, AbstractProcessor}
 import org.apache.kafka.streams.state.KeyValueStore
 
-class UpdateProcessor(joinDefs: List[JoinDef]) extends AbstractProcessor[MaxwellKey, MaxwellValue] {
-  var dataStore: KeyValueStore[MaxwellKey, MaxwellData] = null
-  var idxStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]] = null
-  var mdStore:   KeyValueStore[DBAndTable, List[String]] = null
-
-  override def init(context: ProcessorContext): Unit = {
-    super.init(context)
-    dataStore = context.getStateStore(MaxwellJoin.DataStoreName).asInstanceOf[KeyValueStore[MaxwellKey, MaxwellData]]
-    idxStore = context.getStateStore(MaxwellJoin.LinkStoreName).asInstanceOf[KeyValueStore[MaxwellKey, Set[MaxwellRef]]]
-    mdStore   = context.getStateStore(MaxwellJoin.MetadataStoreName).asInstanceOf[KeyValueStore[DBAndTable, List[String]]]
-  }
-
-  lazy private val tableInfo = TableInformation(mdStore)
-  lazy private val indexStore = IndexStore(dataStore, idxStore)
-
-
+class UpdateProcessor(joinDefs: List[JoinDef]) extends AbstractJoinProcessor  {
   private def indexKey(key: MaxwellKey, field: String, value: Any) =
     MaxwellKey(key.database, key.table, List((field -> value)))
 

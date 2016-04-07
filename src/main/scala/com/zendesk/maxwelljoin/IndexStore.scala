@@ -2,13 +2,14 @@ package com.zendesk.maxwelljoin
 
 import org.apache.kafka.streams.state.KeyValueStore
 
-
 // this class provides access to a pair of key value stores that
 // ape mysql's clustered index: data is kept in the `dataStore`,
 // which is keyed into by the table's primary key,
 // and `indexStore` maintains backwards pointers to that data
-class IndexStore(dataStore: KeyValueStore[MaxwellKey, MaxwellData],
-                 indexStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]]) {
+class IndexStore(
+  dataStore: KeyValueStore[MaxwellKey, MaxwellData],
+  indexStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]]
+) {
 
   def getData(key: MaxwellKey) = Option(dataStore.get(key))
   def putData(key: MaxwellKey, value: MaxwellData) = dataStore.put(key, value)
@@ -31,10 +32,9 @@ class IndexStore(dataStore: KeyValueStore[MaxwellKey, MaxwellData],
     }
   }
 
-
   def delIndex(key: MaxwellKey, pk: MaxwellRef): Unit = {
     val indexSet = getIndexRef(key) - pk
-    if ( indexSet.isEmpty )
+    if (indexSet.isEmpty)
       indexStore.delete(key)
     else
       indexStore.put(key, indexSet)
@@ -43,8 +43,8 @@ class IndexStore(dataStore: KeyValueStore[MaxwellKey, MaxwellData],
   def getJoinData(key: MaxwellKey, joinValue: Any, join: JoinDef, isPKLookup: Boolean): List[(MaxwellKey, MaxwellData)] = {
     val lookupKey = MaxwellKey(key.database, join.thatTable, List(join.thatField -> joinValue))
 
-    if ( isPKLookup ) {
-      getData(lookupKey).map { d => List(lookupKey -> d)}.getOrElse(List())
+    if (isPKLookup) {
+      getData(lookupKey).map { d => List(lookupKey -> d) }.getOrElse(List())
     } else {
       getIndex(key).toList.flatMap { primaryKey =>
         getData(primaryKey).map(primaryKey -> _)
@@ -54,7 +54,9 @@ class IndexStore(dataStore: KeyValueStore[MaxwellKey, MaxwellData],
 }
 
 object IndexStore {
-  def apply(dataStore: KeyValueStore[MaxwellKey, MaxwellData],
-                   indexStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]]) =
+  def apply(
+    dataStore: KeyValueStore[MaxwellKey, MaxwellData],
+    indexStore: KeyValueStore[MaxwellKey, Set[MaxwellRef]]
+  ) =
     new IndexStore(dataStore, indexStore)
 }

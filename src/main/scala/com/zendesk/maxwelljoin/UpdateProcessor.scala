@@ -92,7 +92,7 @@ class UpdateProcessor(joinDefs: List[JoinDef], forwardSelf: Boolean) extends Abs
 
     replays.foreach { replay =>
       indexStore.getData(replay) map { data =>
-        val mValue = MaxwellValue("replay", replay.database, replay.table, System.currentTimeMillis() / 1000, 0, data, None)
+        val mValue = MaxwellValue("replay", replay.database, replay.table, System.currentTimeMillis() / 1000, None, data, None)
         context.forward(replay, mValue)
       }
     }

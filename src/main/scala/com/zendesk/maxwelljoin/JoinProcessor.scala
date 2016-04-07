@@ -1,17 +1,41 @@
 package com.zendesk.maxwelljoin
-
 class JoinProcessor(joinDefs: List[JoinDef]) extends AbstractJoinProcessor(joinDefs) {
 
-  def performJoin(key: MaxwellKey, data: MaxwellData, join: JoinDef) = {
+  def performJoins(alias: String, database: String, data: MaxwellData): MaxwellData = {
+    val tableJoins = joinDefs.filter(_.thisAlias == alias)
+
+    tableJoins.foldLeft(data) { (d, join) =>
+      d.get(join.thisField).map { joinValue =>
+        val isJoinToPK = tableInfo.isKeyPrimary(database, join.thatTable, join.thatField)
+        val lookupKey = MaxwellKey(database, join.thatTable, List(join.thatField -> joinValue))
+
+        if (isJoinToPK) {
+          val maybeRightData = indexStore.getData(lookupKey)
+
+          maybeRightData.map { rightData =>
+            val joinedRightData = performJoins(join.thatAlias, database, rightData)
+            d + (join.thatAlias -> joinedRightData)
+          }.getOrElse(d)
+        } else {
+          val rightData =
+            for ( key <- indexStore.getIndex(lookupKey);
+                rightData <- indexStore.getData(key) ) yield rightData
+
+          val joinedRightData = rightData.map { r => performJoins(join.thatAlias, database, r) }
+          d + (join.thatAlias -> joinedRightData)
+        }
+      }.getOrElse(d)
+        //.getOrElse(data)
+    }
     // start with ticket in hand
 
     // get all right-hand joins to this table
-    val joins = joinDefs.filter(_.thisTable == key.table)
 
   }
 
   override def process(key: MaxwellKey, value: MaxwellValue): Unit = {
-    context.forward(key, value.data)
+    val data = performJoins(key.table, key.database, value.data)
+    context.forward(key, data)
   }
 
   def processRightPointingJoin(key: MaxwellKey, data: MaxwellData, join: JoinDef): MaxwellData = {

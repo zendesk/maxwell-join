@@ -17,7 +17,7 @@ case class MaxwellKey(val database: String, val table: String, val fields: Maxwe
 }
 
 case class MaxwellValue(val rowType: String, val database: String, val table: String,
-  val ts: BigInt, val xid: BigInt,
+  val ts: BigInt, val xid: Option[BigInt],
   val data: Map[String, Any], val old: Option[Map[String, Any]])
 case class DBAndTable(val db: String, val table: String)
 
@@ -57,6 +57,8 @@ object MaxwellJoin extends App {
   val joinBuilder = new JoinBuilder(builder, "tickets", "maxwell", "maxwell-tickets")
   joinBuilder.join(from = "tickets.requester_id", to = "users.id", as = "requester")
   joinBuilder.join(from = "tickets.id", to = "ticket_field_entries.ticket_id")
+  joinBuilder.join(from = "requester.id", to = "cf_values.owner_id")
+  joinBuilder.join(from = "requester.organization_id", to = "organizations.id")
   joinBuilder.build
 
   val stream: KafkaStreams = new KafkaStreams(builder, streamingConfig)

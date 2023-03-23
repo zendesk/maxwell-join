@@ -62,12 +62,12 @@
     <dependency>
       <groupId>org.json4s</groupId>
       <artifactId>json4s-native_2.11</artifactId>
-      <version>3.3.0</version>
+      <version>3.6.12</version>
     </dependency>
     <dependency>
       <groupId>org.json4s</groupId>
       <artifactId>json4s-native_2.11</artifactId>
-      <version>3.3.0</version>
+      <version>3.6.12</version>
     </dependency>
   </dependencies>
 </project>
